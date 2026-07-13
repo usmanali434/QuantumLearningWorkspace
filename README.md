@@ -1,3 +1,1 @@
-# QuantumLearningWorkspace
-
-Created by a Commander on QuantumLogics Community.
+# Quantum Learning workspace Project 
