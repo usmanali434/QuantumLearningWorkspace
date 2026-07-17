@@ -13,8 +13,8 @@ function App() {
 
   return (
     <div style={{ textAlign: 'center', marginTop: '4rem' }}>
-      <h1>StudyMind AI</h1>
-      <p>Backend status: <strong>{status}</strong></p>
+      <h1>Quantum Learning Workspace</h1>
+      <p>Backend status : <strong>{status}</strong></p>
     </div>
   );
 }
