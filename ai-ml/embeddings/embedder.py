@@ -1,0 +1,1 @@
+ # Controls embedding generation workflow

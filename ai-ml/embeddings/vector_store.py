@@ -1,0 +1,1 @@
+# Store & retrieve embeddings from Pinecone/MongoDB
