@@ -24,7 +24,11 @@ COMBINE_QUESTION = (
 
 def print_result(question: str, result: AskResult) -> None:
     print(f"\nQuestion: {question}")
-    print(f"top_k={result.top_k} refused={result.refused}")
+    print(f"Rewritten: {result.rewritten_question}")
+    print(
+        f"top_k={result.top_k} refused={result.refused} "
+        f"grounded={result.grounded} source_ids={result.source_ids}"
+    )
     if result.sources:
         print(f"\nRetrieved {len(result.sources)} chunk(s):")
         for src in result.sources:

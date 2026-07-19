@@ -48,10 +48,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="StudyMind Chatbot — RAG API",
     description=(
-        "Team Mu chat service: multi-chunk retrieval + Groq answers. "
+        "Team Mu chat service: query rewriting, multi-chunk retrieval, "
+        "optional LLM re-ranking, source attribution, and grounding checks. "
         "See docs/api-contracts.md for the Web team contract."
     ),
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -92,6 +93,7 @@ def ask_endpoint(body: AskRequest) -> AskResponse:
             top_k=body.top_k,
             include_sources=body.include_sources,
             update_history=False,
+            rerank=body.rerank,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -100,19 +102,24 @@ def ask_endpoint(body: AskRequest) -> AskResponse:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     sources = None
+    source_ids: list[str] = []
     if body.include_sources:
-        # Contract: empty sources list on refuse (no trusted context for the answer)
         if result.refused:
             sources = []
+            source_ids = []
         else:
             sources = [
                 SourceItem(id=s.id, distance=s.distance, preview=s.preview)
                 for s in result.sources
             ]
+            source_ids = list(result.source_ids) or [s.id for s in result.sources]
 
     return AskResponse(
         answer=result.answer,
         refused=result.refused,
         top_k=result.top_k,
         sources=sources,
+        source_ids=source_ids,
+        rewritten_question=result.rewritten_question,
+        grounded=result.grounded,
     )

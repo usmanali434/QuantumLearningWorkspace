@@ -1,13 +1,13 @@
 """
 Multi-turn conversational RAG with short-term memory (CLI demo).
 
-Default mode runs a scripted 3-4 turn conversation (reviewer-friendly).
-Pass --interactive for a live REPL.
+Phase 5: prints rewritten query, sources, and grounded flag so reviewers
+can confirm follow-ups retrieve the right chunks.
 
 Usage:
   python conversational_rag.py
   python conversational_rag.py --interactive
-  python conversational_rag.py --k 4
+  python conversational_rag.py --k 4 --no-rerank
 """
 
 from __future__ import annotations
@@ -32,9 +32,22 @@ SCRIPTED_TURNS = [
 ]
 
 
-def run_scripted(engine, n_results: int) -> None:
+def _print_result(result) -> None:
+    print(f"Rewritten query: {result.rewritten_question}")
+    print(f"grounded={result.grounded} refused={result.refused}")
+    if result.source_ids:
+        print(f"source_ids: {result.source_ids}")
+    if result.sources:
+        print(f"Retrieved {len(result.sources)} chunk(s):")
+        for src in result.sources:
+            dist = f", d={src.distance:.4f}" if src.distance is not None else ""
+            print(f"  - {src.id}{dist}: {src.preview}")
+    print(f"\nAssistant: {result.answer}")
+
+
+def run_scripted(engine, n_results: int, rerank: bool) -> None:
     history: list[dict] = []
-    print("\n=== Scripted conversation demo ===\n")
+    print("\n=== Scripted conversation demo (Phase 5) ===\n")
     for turn_number, question in enumerate(SCRIPTED_TURNS, start=1):
         print(f"\n----- Turn {turn_number} -----")
         print(f"User: {question}")
@@ -45,16 +58,12 @@ def run_scripted(engine, n_results: int) -> None:
             top_k=n_results,
             include_sources=True,
             update_history=True,
+            rerank=rerank,
         )
-        if result.sources:
-            print(f"Retrieved {len(result.sources)} chunk(s) (refused={result.refused}):")
-            for src in result.sources:
-                dist = f", d={src.distance:.4f}" if src.distance is not None else ""
-                print(f"  - {src.id}{dist}")
-        print(f"\nAssistant: {result.answer}")
+        _print_result(result)
 
 
-def run_interactive(engine, n_results: int) -> None:
+def run_interactive(engine, n_results: int, rerank: bool) -> None:
     history: list[dict] = []
     print("\n=== Interactive mode (type 'quit' to exit) ===\n")
     while True:
@@ -73,9 +82,12 @@ def run_interactive(engine, n_results: int) -> None:
             question,
             history=history,
             top_k=n_results,
-            include_sources=False,
+            include_sources=True,
             update_history=True,
+            rerank=rerank,
         )
+        print(f"(rewritten: {result.rewritten_question})")
+        print(f"(grounded={result.grounded}, sources={result.source_ids})")
         print(f"\nAssistant: {result.answer}\n")
 
 
@@ -90,7 +102,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--k",
         type=int,
         default=DEFAULT_TOP_K,
-        help=f"Number of chunks to retrieve per turn (default: {DEFAULT_TOP_K})",
+        help=f"Number of chunks to keep after retrieval/rerank (default: {DEFAULT_TOP_K})",
+    )
+    parser.add_argument(
+        "--no-rerank",
+        action="store_true",
+        help="Disable LLM re-ranking of candidate chunks",
     )
     return parser.parse_args(argv)
 
@@ -101,11 +118,12 @@ def main(argv: list[str] | None = None) -> None:
     engine = create_engine(collection_name="study_chunks_memory")
     print(f"Indexed {engine.chunks_indexed} chunk(s); max_distance={engine.max_distance}")
     n_results = max(1, args.k)
+    rerank = not args.no_rerank
 
     if args.interactive:
-        run_interactive(engine, n_results)
+        run_interactive(engine, n_results, rerank)
     else:
-        run_scripted(engine, n_results)
+        run_scripted(engine, n_results, rerank)
 
 
 if __name__ == "__main__":

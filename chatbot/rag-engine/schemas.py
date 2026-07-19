@@ -30,6 +30,13 @@ class AskRequest(BaseModel):
         default=True,
         description="Include retrieved chunk ids/distances/previews in the response",
     )
+    rerank: bool = Field(
+        default=True,
+        description=(
+            "When true, retrieve a wider candidate pool and LLM-rerank to top_k. "
+            "Ignored if ENABLE_RERANK=false in the environment."
+        ),
+    )
 
     @field_validator("question")
     @classmethod
@@ -51,6 +58,9 @@ class AskResponse(BaseModel):
     refused: bool = False
     top_k: int = DEFAULT_TOP_K
     sources: list[SourceItem] | None = None
+    source_ids: list[str] = Field(default_factory=list)
+    rewritten_question: str = ""
+    grounded: bool | None = None
 
 
 class HealthResponse(BaseModel):
