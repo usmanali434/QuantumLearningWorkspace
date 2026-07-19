@@ -9,6 +9,10 @@ from sentence_transformers import SentenceTransformer
 
 DEFAULT_MODEL_NAME = "all-MiniLM-L6-v2"
 DEFAULT_COLLECTION_NAME = "study_chunks"
+DEFAULT_TOP_K = 4
+# Chroma default space is L2; lower distance = more similar.
+# Tuned so on-topic photosynthesis questions pass and off-topic ones refuse.
+DEFAULT_MAX_DISTANCE = 1.2
 
 
 def load_embedding_model(model_name: str = DEFAULT_MODEL_NAME) -> SentenceTransformer:
@@ -44,7 +48,7 @@ def retrieve(
     collection,
     embedding_model: SentenceTransformer,
     question: str,
-    n_results: int = 1,
+    n_results: int = DEFAULT_TOP_K,
 ) -> dict[str, Any]:
     """
     Query the collection for the top-n chunks matching the question.
@@ -69,6 +73,21 @@ def retrieve(
     }
 
 
+def is_relevant(
+    distances: list[float] | None,
+    max_distance: float = DEFAULT_MAX_DISTANCE,
+) -> bool:
+    """
+    Return True if at least one retrieved chunk is close enough.
+
+    Chroma returns L2 distances (lower = better). Refuse when there are no
+    distances, or when the best (minimum) distance exceeds max_distance.
+    """
+    if not distances:
+        return False
+    return min(distances) <= max_distance
+
+
 def format_retrieved_chunks(documents: list[str]) -> str:
     """Join one or more retrieved chunks for the LLM prompt."""
     if not documents:
@@ -79,3 +98,11 @@ def format_retrieved_chunks(documents: list[str]) -> str:
     for i, doc in enumerate(documents, start=1):
         parts.append(f"[Chunk {i}]\n{doc}")
     return "\n\n".join(parts)
+
+
+def chunk_preview(text: str, max_words: int = 20) -> str:
+    """Short preview of a chunk for API source metadata."""
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words]) + "..."
