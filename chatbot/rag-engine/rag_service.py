@@ -11,7 +11,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -88,6 +88,22 @@ class AskResult:
     hop_queries: list[str] = field(default_factory=list)
     conflict_hint: bool = False
 
+
+@dataclass
+class PreparedAsk:
+    """Retrieval complete; ready for answer generation (sync or stream)."""
+
+    question: str
+    history: list[dict]
+    top_k: int
+    rewritten_question: str
+    hop_queries: list[str]
+    retrieved_text: str
+    accumulated: dict[str, Any]
+    refused: bool = False
+    refusal_answer: str = ""
+    include_sources: bool = True
+    client: Groq | None = None
 
 @dataclass
 class RagEngine:
@@ -584,44 +600,131 @@ def _generate_answer(
     return response.choices[0].message.content or ""
 
 
-def _retrieve_round(
-    engine: RagEngine,
-    client: Groq | None,
-    query: str,
-    k: int,
-    do_rerank: bool,
-) -> tuple[dict[str, Any], Groq | None]:
-    n_retrieve = RERANK_CANDIDATE_COUNT if do_rerank else k
-    n_retrieve = max(1, min(n_retrieve, max(engine.chunks_indexed, 1)))
-    results = retrieve(
-        engine.collection,
-        engine.embedding_model,
-        query,
-        n_results=n_retrieve,
+def generate_answer_sync(
+    client: Groq,
+    prepared: PreparedAsk,
+    *,
+    strict: bool = False,
+) -> str:
+    """Non-streaming answer generation from a PreparedAsk."""
+    return _generate_answer(
+        client,
+        prepared.history,
+        prepared.retrieved_text,
+        prepared.question,
+        strict=strict,
     )
-    if do_rerank and len(results.get("ids") or []) > k:
-        if client is None:
-            client = _get_groq(engine)
-        results = rerank_chunks(client, query, results, top_k=k)
-    else:
-        ids = (results.get("ids") or [])[:k]
-        results = select_results_by_ids(results, ids)
-    return results, client
 
 
-def ask(
+def stream_answer_tokens(
+    client: Groq,
+    prepared: PreparedAsk,
+) -> Iterator[str]:
+    """Yield text deltas from Groq streaming completion."""
+    messages = build_messages(
+        prepared.history,
+        prepared.retrieved_text,
+        prepared.question,
+        strict=False,
+    )
+    stream = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=messages,
+        temperature=0.3,
+        stream=True,
+    )
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
+
+def _prepared_to_ask_result(
+    prepared: PreparedAsk,
+    answer: str,
+    grounded: bool | None,
+) -> AskResult:
+    final_sources = _build_sources(prepared.accumulated) if prepared.include_sources else []
+    final_ids = (
+        [s.id for s in final_sources]
+        if prepared.include_sources
+        else list(prepared.accumulated.get("ids") or [])
+    )
+    return AskResult(
+        answer=answer,
+        refused=False,
+        top_k=prepared.top_k,
+        sources=final_sources,
+        rewritten_question=prepared.rewritten_question,
+        grounded=grounded,
+        source_ids=final_ids,
+        retrieval_rounds=len(prepared.hop_queries),
+        hop_queries=list(prepared.hop_queries),
+        conflict_hint=_conflict_hint_from_results(prepared.accumulated),
+    )
+
+
+def _refusal_result(
+    prepared: PreparedAsk,
+) -> AskResult:
+    return AskResult(
+        answer=prepared.refusal_answer,
+        refused=True,
+        top_k=prepared.top_k,
+        sources=[],
+        rewritten_question=prepared.rewritten_question,
+        grounded=None,
+        source_ids=[],
+        retrieval_rounds=len(prepared.hop_queries) or 1,
+        hop_queries=list(prepared.hop_queries),
+        conflict_hint=False,
+    )
+
+
+def finalize_ask(
+    engine: RagEngine,
+    prepared: PreparedAsk,
+    answer: str,
+    *,
+    update_history: bool = False,
+    history: list[dict] | None = None,
+    timing: Any | None = None,
+) -> AskResult:
+    """Grounding check + optional strict regen; build AskResult."""
+    if prepared.refused:
+        if update_history and history is not None:
+            _append_history(history, prepared.question, prepared.refusal_answer)
+        return _refusal_result(prepared)
+
+    client = prepared.client or _get_groq(engine)
+    if timing is not None:
+        timing.start_grounding()
+    grounded = check_grounding(client, prepared.retrieved_text, answer)
+    if not grounded:
+        answer = generate_answer_sync(client, prepared, strict=True)
+        grounded = check_grounding(client, prepared.retrieved_text, answer)
+    if timing is not None:
+        timing.end_grounding()
+
+    if update_history and history is not None:
+        _append_history(history, prepared.question, answer)
+
+    return _prepared_to_ask_result(prepared, answer, grounded)
+
+
+def prepare_ask(
     engine: RagEngine,
     question: str,
     history: list[dict] | None = None,
     top_k: int | None = None,
     include_sources: bool = True,
-    update_history: bool = False,
     rerank: bool | None = None,
     multi_hop: bool | None = None,
-) -> AskResult:
+) -> PreparedAsk:
     """
-    Phase 6 pipeline:
-      rewrite → multi-hop retrieve (max N) → gate → answer → ground.
+    Run rewrite → multi-hop retrieve → relevance gate.
+
+    Returns PreparedAsk ready for sync/stream answer generation.
     """
     cleaned = (question or "").strip()
     if not cleaned:
@@ -661,41 +764,38 @@ def ask(
             engine, client, current_query, k, do_rerank
         )
 
-        # First round relevance gate (before spending hop-decision calls)
         if round_idx == 0 and not is_relevant(
             round_results.get("distances"),
             max_distance=engine.max_distance,
         ):
-            answer = REFUSAL_MESSAGE
-            if update_history and history is not None:
-                _append_history(history, cleaned, answer)
-            return AskResult(
-                answer=answer,
-                refused=True,
+            return PreparedAsk(
+                question=cleaned,
+                history=hist,
                 top_k=k,
-                sources=[],
                 rewritten_question=rewritten,
-                grounded=None,
-                source_ids=[],
-                retrieval_rounds=1,
                 hop_queries=hop_queries,
-                conflict_hint=False,
+                retrieved_text="",
+                accumulated=accumulated,
+                refused=True,
+                refusal_answer=REFUSAL_MESSAGE,
+                include_sources=include_sources,
+                client=client,
             )
 
         accumulated = merge_results(accumulated, round_results)
-        retrieved_text = format_untrusted_chunks(
-            accumulated.get("documents") or [],
-            accumulated.get("ids"),
-            accumulated.get("metadatas"),
-        )
 
         if round_idx >= max_rounds - 1:
             break
 
         if client is None:
             client = _get_groq(engine)
+        retrieved_so_far = format_untrusted_chunks(
+            accumulated.get("documents") or [],
+            accumulated.get("ids"),
+            accumulated.get("metadatas"),
+        )
         enough, next_query = decide_need_more(
-            client, cleaned, retrieved_text, hop_queries
+            client, cleaned, retrieved_so_far, hop_queries
         )
         if enough or not next_query:
             break
@@ -707,32 +807,77 @@ def ask(
         accumulated.get("metadatas"),
     )
 
-    if client is None:
-        client = _get_groq(engine)
-
-    answer = _generate_answer(client, hist, retrieved_text, cleaned, strict=False)
-    grounded = check_grounding(client, retrieved_text, answer)
-    if not grounded:
-        answer = _generate_answer(client, hist, retrieved_text, cleaned, strict=True)
-        grounded = check_grounding(client, retrieved_text, answer)
-
-    if update_history and history is not None:
-        _append_history(history, cleaned, answer)
-
-    final_sources = _build_sources(accumulated) if include_sources else []
-    final_ids = [s.id for s in final_sources] if include_sources else list(
-        accumulated.get("ids") or []
+    return PreparedAsk(
+        question=cleaned,
+        history=hist,
+        top_k=k,
+        rewritten_question=rewritten,
+        hop_queries=hop_queries,
+        retrieved_text=retrieved_text,
+        accumulated=accumulated,
+        refused=False,
+        include_sources=include_sources,
+        client=client,
     )
 
-    return AskResult(
-        answer=answer,
-        refused=False,
-        top_k=k,
-        sources=final_sources,
-        rewritten_question=rewritten,
-        grounded=grounded,
-        source_ids=final_ids,
-        retrieval_rounds=len(hop_queries),
-        hop_queries=hop_queries,
-        conflict_hint=_conflict_hint_from_results(accumulated),
+def _retrieve_round(
+    engine: RagEngine,
+    client: Groq | None,
+    query: str,
+    k: int,
+    do_rerank: bool,
+) -> tuple[dict[str, Any], Groq | None]:
+    n_retrieve = RERANK_CANDIDATE_COUNT if do_rerank else k
+    n_retrieve = max(1, min(n_retrieve, max(engine.chunks_indexed, 1)))
+    results = retrieve(
+        engine.collection,
+        engine.embedding_model,
+        query,
+        n_results=n_retrieve,
+    )
+    if do_rerank and len(results.get("ids") or []) > k:
+        if client is None:
+            client = _get_groq(engine)
+        results = rerank_chunks(client, query, results, top_k=k)
+    else:
+        ids = (results.get("ids") or [])[:k]
+        results = select_results_by_ids(results, ids)
+    return results, client
+
+
+def ask(
+    engine: RagEngine,
+    question: str,
+    history: list[dict] | None = None,
+    top_k: int | None = None,
+    include_sources: bool = True,
+    update_history: bool = False,
+    rerank: bool | None = None,
+    multi_hop: bool | None = None,
+) -> AskResult:
+    """
+    Full pipeline: prepare → sync answer → finalize (grounding).
+    """
+    prepared = prepare_ask(
+        engine,
+        question,
+        history=history,
+        top_k=top_k,
+        include_sources=include_sources,
+        rerank=rerank,
+        multi_hop=multi_hop,
+    )
+    if prepared.refused:
+        if update_history and history is not None:
+            _append_history(history, prepared.question, prepared.refusal_answer)
+        return _refusal_result(prepared)
+
+    client = prepared.client or _get_groq(engine)
+    answer = generate_answer_sync(client, prepared, strict=False)
+    return finalize_ask(
+        engine,
+        prepared,
+        answer,
+        update_history=update_history,
+        history=history,
     )

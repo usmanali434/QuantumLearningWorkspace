@@ -44,6 +44,10 @@ class AskRequest(BaseModel):
             "Ignored if ENABLE_MULTI_HOP=false."
         ),
     )
+    skip_cache: bool = Field(
+        default=False,
+        description="Bypass the in-memory answer cache for this request",
+    )
 
     @field_validator("question")
     @classmethod
@@ -61,6 +65,13 @@ class SourceItem(BaseModel):
     source: str = ""
 
 
+class TimingInfo(BaseModel):
+    retrieval_ms: float | None = None
+    llm_ms: float | None = None
+    grounding_ms: float | None = None
+    total_ms: float | None = None
+
+
 class AskResponse(BaseModel):
     answer: str
     refused: bool = False
@@ -72,11 +83,19 @@ class AskResponse(BaseModel):
     retrieval_rounds: int = 0
     hop_queries: list[str] = Field(default_factory=list)
     conflict_hint: bool = False
+    cached: bool = False
+    timing: TimingInfo | None = None
 
 
 class HealthResponse(BaseModel):
     status: str
+    ready: bool = True
     chunks_indexed: int
     embedding_model: str
     default_top_k: int
     max_distance: float
+    cache_entries: int = 0
+    cache_hits: int = 0
+    cache_backend: str = "memory"
+    rate_limit_backend: str = "memory"
+    groq_configured: bool = False

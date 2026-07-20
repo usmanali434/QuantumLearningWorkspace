@@ -22,11 +22,9 @@ uvicorn main:app --reload --host 127.0.0.1 --port 8001
 
 Interactive docs: [http://127.0.0.1:8001/docs](http://127.0.0.1:8001/docs)
 
-Env vars: see `chatbot/rag-engine/.env.example` (`GROQ_API_KEY`, optional `DEFAULT_TOP_K`, `MAX_DISTANCE`, `ENABLE_RERANK`, `ENABLE_MULTI_HOP`, `MAX_RETRIEVAL_ROUNDS`, `CORS_ORIGINS`).
+Env vars: see `chatbot/rag-engine/.env.example` (includes `ENABLE_CACHE`, `RATE_LIMIT_MAX`, `ENABLE_MULTI_HOP`, etc.).
 
-**Pipeline (Phase 6):** query rewrite (when history) → agentic multi-hop retrieve (max 3) → optional re-rank → relevance gate → answer with **original** question (conflict + injection rules) → grounding check.
-
-Multi-source demo corpus under `chatbot/rag-engine/data/`: PDF overview, YouTube lecture notes, conflict notes, injection sample.
+**Pipeline:** query rewrite → multi-hop retrieve → optional re-rank → relevance gate → answer → grounding check. `/ask` also applies cache, rate limits, and timing.
 
 ---
 
@@ -37,12 +35,26 @@ Multi-source demo corpus under `chatbot/rag-engine/data/`: PDF overview, YouTube
 ```json
 {
   "status": "ok",
+  "ready": true,
   "chunks_indexed": 12,
   "embedding_model": "all-MiniLM-L6-v2",
   "default_top_k": 4,
-  "max_distance": 1.2
+  "max_distance": 1.2,
+  "cache_entries": 3,
+  "cache_hits": 12,
+  "cache_backend": "memory",
+  "rate_limit_backend": "memory",
+  "groq_configured": true
 }
 ```
+
+| Field | Description |
+|-------|-------------|
+| `ready` | `true` when the embedding index finished startup warmup |
+| `status` | `ok` when ready; `warming` during startup |
+| `cache_backend` | `memory` or `redis` |
+| `rate_limit_backend` | `memory` or `redis` |
+| `groq_configured` | Whether `GROQ_API_KEY` is set (answers still require a valid key) |
 
 ---
 
@@ -52,84 +64,72 @@ Multi-source demo corpus under `chatbot/rag-engine/data/`: PDF overview, YouTube
 
 | Field | Type | Required | Default | Notes |
 |-------|------|----------|---------|--------|
-| `question` | string | yes | — | Non-empty; original wording used for the final answer |
-| `history` | array of `{role, content}` | no | omit | Triggers query rewrite for follow-ups |
-| `top_k` | integer | no | `4` | Clamped **1–8** (per hop) |
+| `question` | string | yes | — | Non-empty |
+| `history` | array | no | omit | Triggers query rewrite |
+| `top_k` | integer | no | `4` | Clamped **1–8** |
 | `include_sources` | boolean | no | `true` | Rich `sources` objects |
-| `rerank` | boolean | no | `true` | LLM re-rank wider pool → `top_k` |
-| `multi_hop` | boolean | no | `true` | Allow additional retrieval rounds (max `MAX_RETRIEVAL_ROUNDS`) |
+| `rerank` | boolean | no | `true` | LLM re-rank |
+| `multi_hop` | boolean | no | `true` | Agentic retrieval hops |
+| `skip_cache` | boolean | no | `false` | Bypass cache; or header `X-Skip-Cache: 1` |
 
-**Example (cross-source compare — often multi-hop):**
+**Rate limit:** 10 requests / 60s per `X-User-Id` (or client IP). Returns **429** with `Retry-After` header.
 
-```json
-{
-  "question": "Compare what the PDF textbook says about where the Calvin cycle occurs with what the YouTube lecture says about how ATP is produced in the light reactions.",
-  "top_k": 4,
-  "multi_hop": true,
-  "include_sources": true
-}
-```
-
-#### Response `200`
+#### Response `200` (additive Phase 7 fields)
 
 | Field | Type | Notes |
 |-------|------|--------|
-| `answer` | string | Always present |
-| `refused` | boolean | Relevance gate failed |
-| `top_k` | integer | Per-hop keep count |
-| `sources` | array or `null` | Rich attribution when `include_sources` |
-| `source_ids` | string[] | e.g. `["pdf_chunk_1","yt_chunk_0"]` |
-| `rewritten_question` | string | First-hop search query (after rewrite) |
-| `grounded` | boolean or `null` | `null` when refused |
-| `retrieval_rounds` | integer | How many retrieval hops ran |
-| `hop_queries` | string[] | Every embedded search query in order |
-| `conflict_hint` | boolean | `true` when conflict fixture chunks were among sources |
+| `cached` | boolean | `true` if served from in-memory cache |
+| `timing` | object | `{retrieval_ms, llm_ms, grounding_ms, total_ms}` |
 
-**Source item:** `id`, `distance`, `preview`, `source` (filename).
+**Response headers:** `X-Cache-Hit`, `X-Retrieval-Ms`, `X-Llm-Ms`, `X-Total-Ms`
 
-**Success example:**
+Plus all Phase 6 fields: `answer`, `refused`, `sources`, `source_ids`, `rewritten_question`, `grounded`, `retrieval_rounds`, `hop_queries`, `conflict_hint`.
+
+**Cache rules:** Identical question + history + `top_k` / `rerank` / `multi_hop` hits cache. Refusals and `grounded: false` answers are **not** cached.
+
+---
+
+### `POST /ask/stream`
+
+Streams the answer as **NDJSON** (`Content-Type: application/x-ndjson`). Same request body as `/ask`. Rate limited identically.
+
+**Event types:**
+
+1. **metadata** (first line) — retrieval complete; includes `source_ids`, `hop_queries`, partial `timing`, `refused`, `cached`.
+2. **token** — `{"type":"token","content":"..."}` per text delta.
+3. **done** — final `grounded`, full `timing`, `cached`.
+4. **error** — `{"type":"error","detail":"..."}` on failure.
+
+**Refusal:** metadata includes `refused: true` and `answer` with refusal text; no token events; then `done`.
+
+**Test client:**
+
+```bash
+cd chatbot/rag-engine
+python scripts/stream_client.py "Where does the Calvin cycle occur?"
+```
+
+**Example metadata event:**
 
 ```json
-{
-  "answer": "Your sources cover different aspects... The PDF says the Calvin cycle occurs in the stroma. The YouTube lecture explains ATP is produced via chemiosmosis through ATP synthase...",
-  "refused": false,
-  "top_k": 4,
-  "source_ids": ["pdf_chunk_1", "yt_chunk_0"],
-  "rewritten_question": "Compare PDF Calvin cycle location with YouTube ATP production...",
-  "grounded": true,
-  "retrieval_rounds": 2,
-  "hop_queries": [
-    "Compare PDF Calvin cycle location with YouTube ATP production...",
-    "YouTube lecture ATP synthase proton gradient light reactions"
-  ],
-  "conflict_hint": false,
-  "sources": [
-    {
-      "id": "pdf_chunk_1",
-      "distance": 0.45,
-      "preview": "The Calvin cycle takes place in the stroma...",
-      "source": "photosynthesis_overview.txt"
-    }
-  ]
-}
+{"type":"metadata","refused":false,"source_ids":["pdf_chunk_1"],"rewritten_question":"...","retrieval_rounds":1,"hop_queries":["..."],"grounded":null,"cached":false,"timing":{"retrieval_ms":420,"llm_ms":null,"total_ms":null}}
 ```
 
-**Conflict example:** When notes disagree, the answer should explicitly say sources disagree (e.g. Calvin cycle darkness claim).
+**Example done event:**
 
-**Refusal:** `grounded` is `null`; `retrieval_rounds` is typically `1`; `sources` / `source_ids` empty.
-
-Exact refusal string:
-
-```text
-I don't have enough information to answer that
+```json
+{"type":"done","grounded":true,"cached":false,"timing":{"retrieval_ms":420,"llm_ms":1800,"grounding_ms":350,"total_ms":2570}}
 ```
 
-#### Errors
+---
+
+### Errors
 
 | Status | When |
 |--------|------|
 | `400` | Empty / invalid `question` |
-| `503` | Engine not ready, or missing `GROQ_API_KEY` when an LLM call is required |
+| `429` | Rate limit exceeded (`Retry-After` header) |
+| `503` | Engine not ready, or missing `GROQ_API_KEY` |
 
 ---
 
