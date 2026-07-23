@@ -1,0 +1,8 @@
+Study Notes — Conflicting Claims About the Calvin Cycle
+Source label: conflict_notes
+
+Source A (outdated worksheet excerpt):
+Some older study worksheets still claim that the Calvin cycle is a set of "dark reactions" that can only run in darkness. According to Source A, the Calvin cycle requires darkness because light would interfere with the enzymes that fix carbon dioxide. Source A also states that students should memorize: "Calvin cycle = night only; light reactions = day only." This worksheet treats the two stages as strictly time-separated and says the Calvin cycle will not proceed while light-dependent reactions are active.
+
+Source B (updated tutor handout):
+A newer tutor handout directly contradicts Source A. Source B states that the Calvin cycle does not require darkness at all. It usually runs in the daytime whenever the light reactions supply enough ATP and NADPH. Calling the Calvin cycle the "dark reactions" is historical wording only; it means the cycle does not absorb photons itself, not that it needs night. Source B warns students: if two notes disagree about whether the Calvin cycle requires darkness, report both claims instead of picking one silently.

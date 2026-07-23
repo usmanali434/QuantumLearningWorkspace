@@ -1,9 +1,7 @@
 venv/
+rag_venv/
 node_modules/
 __pycache__/
-.env
-.env
-venv/
-rag_venv/
-__pycache__/
 *.pyc
+.env
+uploaded_files/
