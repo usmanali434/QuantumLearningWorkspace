@@ -1,0 +1,10 @@
+# All required packages below are free to install and use.
+# Pinecone and MongoDB Atlas each have free tiers for the accounts
+# themselves (see comments in config.py) — always confirm current limits
+# on their pricing pages since free-tier terms can change.
+
+sentence-transformers   # free, local embedding model (no API key, no per-call cost)
+pinecone                # Pinecone vector database client
+pymongo                 # MongoDB client
+python-dotenv           # loads .env config
+requests

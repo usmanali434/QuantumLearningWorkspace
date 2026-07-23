@@ -1,1 +1,0 @@
-# Load and initialize the embedding model
