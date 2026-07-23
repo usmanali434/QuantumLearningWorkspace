@@ -28,3 +28,6 @@ def get_database():
 def get_uploads_collection():
     """Return the uploads collection used by the app."""
     return get_database()["uploads"]
+
+def get_users_collection():
+    return get_database()["users"]
